@@ -47,8 +47,24 @@ struct Valve {
   bool active;
 };
 
-Valve v_ox = { { pin_5, pin_6, pin_7, pin_8 }, v_zero_I, v_max_I, sensor_pin_I, 0, 0, 500, "ox valve", false };
-Valve v_air = { { pin_1, pin_2, pin_3, pin_4 }, v_zero_II, v_max_II, sensor_pin_II, 0, 0, 500, "air valve", false };
+struct Check {
+  bool test_mode;
+
+  bool ov_closed;
+  bool ov_flow;
+
+  bool av_closed;
+  bool av_flow;
+
+  bool ox_sup;
+  bool omax_call;
+  bool omin_call;
+};
+
+Valve v_ox = { { pin_5, pin_6, pin_7, pin_8 }, v_zero_I, v_max_I, sensor_pin_I, 0, 0, 500, "ox valve", false};
+Valve v_air = { { pin_1, pin_2, pin_3, pin_4 }, v_zero_II, v_max_II, sensor_pin_II, 0, 0, 500, "air valve", false};
+
+Check cl = {false, false, false, false, false, false, false, false};
 
 int delta(int a, int b) {
   int delta = 0;
@@ -178,7 +194,7 @@ int read_flow_sensor(Valve v) {
   long mean_flow = 0;
 
   int i = 0;
-  for(i;i<1000;i++){
+  for(i;i<300;i++){
     sensor_data_voltage = (analogRead(v.sensor_pin) / 1023.0) * 4.8;
     flow = (2000 * (powf(sensor_data_voltage, 1.58) - v.v_zero) / (v.v_max));
     mean_flow = mean_flow + flow;
@@ -198,6 +214,34 @@ int serial_print_flow(Valve v, bool ser_output) {
     Serial.println(" ml/min");
   }
   return (cur_flow);
+}
+
+int controll_valve(Valve v){
+  int delta = 0;
+  float delta_rel = 0.0;
+  int steps = 0;
+
+  if(v.set_flow >= 0)
+    delta = v.set_flow-v.cur_flow;
+  // Serial.print("Delta: ");
+  // Serial.println(delta);
+  steps = powf(delta, 1.0/3.0);
+  // Serial.print("Calculated Steps: ");
+  // Serial.println(steps);
+  if(delta < 0)
+    steps = delta * (-1);
+  // Serial.print("steps unsighend: ");
+  // Serial.println(steps);
+  // Serial.print("Steps: ");
+  // Serial.println(steps);
+  if(steps > 10)
+    steps = 4;
+  if(delta > 4)
+    v.opening_state = open_n_steps(v, 100, steps);
+  if(delta < -4){
+    v.opening_state = close_n_steps(v, 100, steps);
+  }
+  return(v.opening_state);
 }
 
 bool v_zero_calibration(Valve v) {
@@ -226,53 +270,78 @@ bool v_zero_calibration(Valve v) {
   return (true);
 }
 
-int controll_valve(Valve v){
-  int delta = 0;
-  float delta_rel = 0.0;
-  int steps = 0;
+void show_ox() {
+  Serial.print("Oxygen saturation: ");
+  float oxygen_data = oxygen.readOxygenConcentration();
+  Serial.print("current data is: ");
+  Serial.print(oxygen_data);
+  Serial.println(" %vol");
+}
 
-  if(v.set_flow >= 0)
-    delta = v.set_flow-v.cur_flow;
-  Serial.print("Delta: ");
-  Serial.println(delta);
-  steps = powf(delta, 1.0/3.0);
-  Serial.print("Calculated Steps: ");
-  Serial.println(steps);
-  if(delta < 0)
-    steps = delta * (-1);
-  Serial.print("steps unsighend: ");
-  Serial.println(steps);
-  Serial.print("Steps: ");
-  Serial.println(steps);
-  // steps = delta_rel * 512;
-  if(steps > 10)
-    steps = 4;
-  if(delta > 4)
-    v.opening_state = open_n_steps(v, 100, steps);
-  if(delta < -4){
-    v.opening_state = close_n_steps(v, 100, steps);
+void ox_zero_calibration(Valve ox_valve, Valve air_valve) {
+  float oxygen_data = 0.0;
+  
+  ox_valve.cur_flow = read_flow_sensor(ox_valve);
+  if(oxygen.clearCalibration()) {
+    Serial.println("clear calibration success!\n");
+    air_valve.opening_state = open_n_steps(air_valve, 400, 100);
+    show_ox();
+
+    oxygen_data = oxygen.readOxygenConcentration();
+    while (!(oxygen_data < 23)){
+      oxygen_data = oxygen.readOxygenConcentration();
+      Serial.println(oxygen_data);
+      delay(1000);
+    }
+    delay(10000);
+    if(oxygen.calibration_20_9()) 
+        Serial.println("20.9 calibration success!");
+    else
+      Serial.println("20.9 calibration failed!");
+  v_air.opening_state = 500;
+  v_air.active = v_zero_calibration(v_air);
+
+    ox_valve.opening_state = open_n_steps(ox_valve, 400, 100);
+    show_ox(); 
+    while (!(oxygen_data > 95)){
+      oxygen_data = oxygen.readOxygenConcentration();
+      Serial.print("Waiting for oxygen flow: ");
+      show_ox();
+      delay(1000);
+    }
+    delay(10000);
+    if(oxygen.calibration_99_5()) 
+      Serial.println("99.5 calibration success!");
+    else
+      Serial.println("99.5 calibration failed!");
   }
-  return(v.opening_state);
+  v_ox.opening_state = 500;
+  v_ox.active = v_zero_calibration(v_ox);
 }
 
 void setup() {
   Serial.begin(9600);
   while(!Serial);
-  while(!oxygen.begin()){
-    Serial.println("NO Deivces !");
-    delay(1000);
-  } 
-  Serial.println("Oxygen sensor system connected");
-  float oxygen_data = oxygen.readOxygenConcentration();
-  Serial.print("current data is: ");
-  Serial.print(oxygen_data);
-  Serial.println(" %vol");
-
-  // Serial.println("starting setup");
   v_ox.active = v_zero_calibration(v_ox);
   if(v_ox.active)
     v_ox.opening_state = 0;
+  Serial.println("ox valve zeroed!");
+
   v_air.active = v_zero_calibration(v_air);
+  if(v_air.active)
+    v_air.opening_state = 0;
+  Serial.println("air valve zeroed!");
+
+
+  while(!oxygen.begin()){
+    Serial.println("NO Deivces !");
+    delay(1000);
+  }
+
+  ox_zero_calibration(v_ox, v_air);
+
+  if(v_ox.active)
+    v_ox.opening_state = 0;
   if(v_air.active)
     v_air.opening_state = 0;
 }
@@ -333,5 +402,5 @@ void loop() {
   // Serial.println(v_II.cur_flow);
 
   // delay(1);
-  // }
+  
 }
