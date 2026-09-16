@@ -55,6 +55,8 @@ struct Ox_sensor {
   signed int set_fio2;
   signed int curr_fio2;
 
+  signed int total_flow;
+
   bool active;
 };
 
@@ -73,7 +75,7 @@ struct Check_list {
 
 Valve v_ox = { { pin_5, pin_6, pin_7, pin_8 }, v_zero_I, v_max_I, gain_I, sensor_pin_I, 0, 0, 500, "oxygen valve", false};
 Valve v_air = { { pin_1, pin_2, pin_3, pin_4 }, v_zero_II, v_max_II, gain_II, sensor_pin_II, 0, 0, 500, "air valve", false};
-Ox_sensor oxs = {21, 21, false};
+Ox_sensor oxs = {21, 21, 0, false};
 
 Check_list cl = {false, false, false, false, false, false, false};
 
@@ -103,32 +105,6 @@ void calc_flows(int set_fio2, int set_ac_flow, int* set_ox_flow, int* set_air_fl
   }
   return;
   // return(set_flows);
-}
-
-void parse_input(char* str, int* set_flows, int* set_ox_flow, int* set_air_flow) {
-  int set_ac_flow = 0;
-  int set_fio2 = 0;
-  int i = 0;
-  if(str[0] == 'o'){
-    str++;
-    *set_ox_flow = atoi(str++);
-  }
-  else if(str[0] == 'a') {
-    str++;
-    *set_air_flow = atoi(str++);
-  } 
-  else if(str[0] == 'f') {
-    while (str[i] != '\0'){
-      if (str[i] == 'f'){
-        set_fio2 = atoi(str+(i+1));
-      }
-      if (str[i] == 'q') {
-        set_ac_flow = atoi(str+(i+1));
-      }
-      i++;
-    }
-  }
-  calc_flows(set_fio2, set_ac_flow, set_ox_flow, set_air_flow);
 }
 
 void step(bool dir, int* pin_arr, int speed) {
@@ -170,6 +146,58 @@ int open_n_steps(Valve* v, int speed, int n) {
   return(v->opening_state);
 }
 
+int controll_valve(Valve v) {
+  int delta = 0;
+  float delta_rel = 0.0;
+  int steps = 0;
+
+  if(v.set_flow >= 0)
+    delta = v.set_flow-v.cur_flow;
+  steps = powf(delta, 1.0/3.0);
+  // Serial.print("Calculated Steps: ");
+  // Serial.println(steps);
+  if(delta < 0)
+    steps = delta * (-1);
+  // Serial.print("steps unsighend: ");
+  // Serial.println(steps);
+  // Serial.print("Steps: ");
+  // Serial.println(steps);
+  if(steps > 10)
+    steps = 4;
+  if(delta > 4)
+    v.opening_state = open_n_steps(&v, 100, steps);
+  if(delta < -4){
+    v.opening_state = close_n_steps(&v, 100, steps);
+  }
+  return(v.opening_state);
+}
+
+void parse_input(char* str, int* set_flows, int* set_ox_flow, int* set_air_flow) {
+  int set_ac_flow = 0;
+  int set_fio2 = 0;
+  int i = 0;
+  if(str[0] == 'o'){
+    str++;
+    *set_ox_flow = atoi(str++);
+  }
+  else if(str[0] == 'a') {
+    str++;
+    *set_air_flow = atoi(str++);
+  } 
+  else if(str[0] == 'f') {
+    while (str[i] != '\0'){
+      if (str[i] == 'f'){
+        set_fio2 = atoi(str+(i+1));
+      }
+      if (str[i] == 'q') {
+        set_ac_flow = atoi(str+(i+1));
+      }
+      i++;
+    }
+  }
+  calc_flows(set_fio2, set_ac_flow, set_ox_flow, set_air_flow);
+}
+
 int read_flow_sensor(Valve* v) {
   float flow = 0;
   float sensor_data_voltage = 0;
@@ -198,32 +226,6 @@ bool handshake() {
   erlse:
     return (false);
 
-}
-
-int controll_valve(Valve v) {
-  int delta = 0;
-  float delta_rel = 0.0;
-  int steps = 0;
-
-  if(v.set_flow >= 0)
-    delta = v.set_flow-v.cur_flow;
-  steps = powf(delta, 1.0/3.0);
-  // Serial.print("Calculated Steps: ");
-  // Serial.println(steps);
-  if(delta < 0)
-    steps = delta * (-1);
-  // Serial.print("steps unsighend: ");
-  // Serial.println(steps);
-  // Serial.print("Steps: ");
-  // Serial.println(steps);
-  if(steps > 10)
-    steps = 4;
-  if(delta > 4)
-    v.opening_state = open_n_steps(&v, 100, steps);
-  if(delta < -4){
-    v.opening_state = close_n_steps(&v, 100, steps);
-  }
-  return(v.opening_state);
 }
 
 bool close_valve(Valve* v) {
@@ -349,11 +351,19 @@ bool self_test(Check_list* cl, Valve v_ox, Valve v_air, Ox_sensor oxs) {
   return (false);
 }
 
+//<gbm>m:mode|set_fio2|set_total_flow|set_oxygen_flow|set_air_flow>
+//<gbm>m:mode|0000|0000|0000|0000>
+//mode is one of: mnl -> manual ox and air flow adjustment || aut -> set fio2 and total_flow
 int parse_serial_msg(String msg, Ox_sensor* oxs, Valve* v_ox, Valve* v_air) {
   if (msg.substring(0, 4) == "<sys>") {
     if (msg.substring(4, 5) == "m") {
       if (msg.substring(6, 9) == "aut") {
-        // hier weiter machen
+        oxs->set_fio2 = msg.substring(15, 19).toInt();
+        oxs->total_flow = msg.substring(20, 24).toInt();
+      }
+      else if (msg.substring(6, 9) == "mnl") {
+        v_ox->set_flow = msg.substring(25, 29).toInt();
+        v_air->set_flow = msg.substring(30, 34).toInt();
       }
     }
     return 1;
@@ -362,9 +372,21 @@ int parse_serial_msg(String msg, Ox_sensor* oxs, Valve* v_ox, Valve* v_air) {
     return 0;
 }
 
-//<sys>m:mode|set_fio2|set_total_flow|set_air_flow|set_oxygen_flow>
-//<sys>m:mode|0000|0000|0000|0000>
-//mode is one of: mnl -> manual ox and air flow adjustment || aut -> set fio2 and total_flow
+//<sys>m:state|set_fio2|set_total_flow|set_oxygen_flow|set_air_flow|fio2|total_flow|oxygen_flow|air_flow>
+//<sys>m:state|0000|0000|0000|0000|0000|0000|0000|0000>
+int broadcast_state(Ox_sensor oxs, Valve v_ox, Valve v_air) {
+  String set_fio2 = String(oxs.set_fio2);
+  String set_total_flow = String(oxs.total_flow);
+  String set_oxygen_flow = String(v_ox.set_flow);
+  String set_air_flow = String(v_air.set_flow);
+  String fio2 = String(oxs.curr_fio2);
+  String oxygen_flow = String(v_ox.cur_flow);
+  String air_flow = String(v_air.cur_flow);
+
+  String bcst_str = "<sys>m:state|" + set_fio2 + "|" + set_total_flow + "|" + set_oxygen_flow + "|" + set_air_flow + "|" + fio2 + "|" + oxygen_flow + "|" + air_flow;
+  Serial.println(bcst_str);
+  return 0;
+}
 
 void setup() {
   bool slf_t = false;
@@ -379,36 +401,15 @@ void setup() {
 }
 
 void loop() {
-  float oxygen_data = oxygen.readOxygenConcentration();
-  String buffer = "";
+  String msg = Serial.readString();
+  parse_serial_msg(msg, &oxs, &v_ox, &v_air);
 
+  read_flow_sensor(&v_ox);
+  read_flow_sensor(&v_air);
+  oxs.curr_fio2 = oxygen.readOxygenConcentration();
 
+  // Process data and link to commands to valves.
 
-  
-  v_ox.cur_flow = read_flow_sensor(&v_ox);
-  v_air.cur_flow = read_flow_sensor(&v_air);
-
-  Serial.print("\naox valve:  ");
-  Serial.print(v_ox.cur_flow);
-  Serial.print(" set flow : ");
-  Serial.print(v_ox.set_flow);
-  Serial.print(" Opening state: ");
-  Serial.println(v_ox.opening_state);
-
-  Serial.print("air valve:  ");
-  Serial.print(v_air.cur_flow);
-  Serial.print(" set flow : ");
-  Serial.print(v_air.set_flow);
-  Serial.print(" Opening state: ");
-  Serial.println(v_air.opening_state);
-
-  v_ox.opening_state = controll_valve(v_ox);
-  v_air.opening_state = controll_valve(v_air);
-
-
-  // delay(1);
-  
-}
-  // delay(1);
+  broadcast_state(oxs, v_ox, v_air);
   
 }
