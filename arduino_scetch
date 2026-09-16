@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <math.h>
+#include <stdio.h>
 #include "DFRobot_EOxygenSensor.h"
 
 #define pin_1 12
@@ -55,27 +56,26 @@ struct Ox_sensor {
   signed int curr_fio2;
 
   bool active;
-}
+};
 
-struct Check {
+struct Check_list {
   bool test_mode;
 
   bool ov_closed;
-  bool ov_flow;
+  bool ov_max_flow;
 
   bool av_closed;
-  bool av_flow;
+  bool av_max_flow;
 
-  bool ox_sup;
-  bool omax_call;
-  bool omin_call;
+  bool ox_supply;
+  bool ox_21_call;
 };
 
-Valve v_ox = { { pin_5, pin_6, pin_7, pin_8 }, v_zero_I, v_max_I, gain_I, sensor_pin_I, 0, 0, 500, "ox valve", false};
+Valve v_ox = { { pin_5, pin_6, pin_7, pin_8 }, v_zero_I, v_max_I, gain_I, sensor_pin_I, 0, 0, 500, "oxygen valve", false};
 Valve v_air = { { pin_1, pin_2, pin_3, pin_4 }, v_zero_II, v_max_II, gain_II, sensor_pin_II, 0, 0, 500, "air valve", false};
-Ox_sensor oxs = (21, 21, false};
+Ox_sensor oxs = {21, 21, false};
 
-Check cl = {false, false, false, false, false, false, false, false};
+Check_list cl = {false, false, false, false, false, false, false};
 
 int delta(int a, int b) {
   int delta = 0;
@@ -96,41 +96,13 @@ int clac_steps(int diff) {
   return (steps);
 }
 
-int atoi(char* str) {
-  int i = 0;
-  int result = 0;
-  while (str[i] >= '0' && str[i] <= '9') {
-    if(result > 999)
-      break;
-    result = result * 10 + (str[i] - '0');
-    i++;
-  }
-  return (result);
-}
-
-char *itoa_pos(int value, char *buf) {
-    char tmp[12];
-    size_t i = 0;
-    size_t j = 0;
-
-    do {
-        tmp[i++] = (char)('0' + value % 10);
-        value /= 10;
-    } while (value > 0);
-
-    while (i > 0)
-        buf[j++] = tmp[--i];
-
-    buf[j] = '\0';
-    return buf;
-}
-
-int calc_flows(int set_fio2, ,int set_ac_flow, , int* set_ox_flow, int* set_air_flow){
+void calc_flows(int set_fio2, int set_ac_flow, int* set_ox_flow, int* set_air_flow) {
   if(set_fio2 >= 21 && set_fio2 <= 100){
     *set_ox_flow = ((set_fio2-21)/0.79)/100;
-    *set_air_flow = (1-(index_ox));
+    *set_air_flow = (1-(*set_ox_flow));
   }
-  return(set_flows);
+  return;
+  // return(set_flows);
 }
 
 void parse_input(char* str, int* set_flows, int* set_ox_flow, int* set_air_flow) {
@@ -156,7 +128,7 @@ void parse_input(char* str, int* set_flows, int* set_ox_flow, int* set_air_flow)
       i++;
     }
   }
-  set_flows = calc_flows(set_fio2, set_ac_flow, set_ox_flow, set_air_flow);
+  calc_flows(set_fio2, set_ac_flow, set_ox_flow, set_air_flow);
 }
 
 void step(bool dir, int* pin_arr, int speed) {
@@ -178,65 +150,63 @@ void step(bool dir, int* pin_arr, int speed) {
   }
 }
 
-// 2038 steps in total
-int close_n_steps(Valve v, int speed, int n) {
-  if (v.opening_state > 0 && n <= v.opening_state) {
-    for (int i = 0; i < n; i++) {
-      step(true, v.pin_arr, speed);
-    }
-    return (v.opening_state - n);
+int close_n_steps(Valve* v, int speed, int n) {
+  int os = v->opening_state;
+  if (v->opening_state > 0 && n <= v->opening_state) {
+    for (int i = 0; i < n; i++)
+      step(true, v->pin_arr, speed);
+    v->opening_state = os-n;
   }
-  return(v.opening_state);
+  return(v->opening_state);
 }
 
-int open_n_steps(Valve v, int speed, int n) {
-  if (v.opening_state < 500 && n <= 100) {
-    for (int i = 0; i < n; i++) {
-      step(false, v.pin_arr, speed);
-      // Serial.println("closing");
-    }
-    return (v.opening_state + n);
+int open_n_steps(Valve* v, int speed, int n) {
+  int os = v->opening_state;
+  if (v->opening_state < 500 && n <= 100) {
+    for (int i = 0; i < n; i++) 
+      step(false, v->pin_arr, speed);
+    v->opening_state = os + n;
   }
-  return(v.opening_state);
+  return(v->opening_state);
 }
 
-int read_flow_sensor(Valve v) {
+int read_flow_sensor(Valve* v) {
   float flow = 0;
   float sensor_data_voltage = 0;
   long mean_flow = 0;
 
   int i = 0;
   for(i;i<300;i++){
-    sensor_data_voltage = (analogRead(v.sensor_pin) / 1023.0) * 4.8;
-    flow = (2000 * (powf(sensor_data_voltage, v.gain) - v.v_zero) / (v.v_max));
+    sensor_data_voltage = (analogRead(v->sensor_pin) / 1023.0) * 4.8;
+    flow = (2000 * (powf(sensor_data_voltage, v->gain) - v->v_zero) / (v->v_max));
     mean_flow = mean_flow + flow;
   }
   Serial.print("sensor_data_voltage: ");
   Serial.println(sensor_data_voltage);
   mean_flow = mean_flow / 1000;
-
+  v->cur_flow = mean_flow;
   return (mean_flow);
 }
 
-int serial_print_flow(Valve v, bool ser_output) {
-  int cur_flow = read_flow_sensor(v);
-  if (ser_output) {
-    Serial.print("flow : ");
-    Serial.print(v.cur_flow);
-    Serial.println(" ml/min");
-  }
-  return (cur_flow);
+bool handshake() {
+  String sys_cmd = "";
+  Serial.println("<gbm>m:hs_request");
+  delay(1000);
+  sys_cmd = Serial.readString();
+  if (sys_cmd == "<sys>m:hs_accept") 
+    return (true);
+  erlse:
+    return (false);
+
 }
 
-int controll_valve(Valve v){
+int controll_valve(Valve v) {
   int delta = 0;
   float delta_rel = 0.0;
   int steps = 0;
 
   if(v.set_flow >= 0)
     delta = v.set_flow-v.cur_flow;
-  // Serial.print("Delta: ");
-  // Serial.println(delta);
   steps = powf(delta, 1.0/3.0);
   // Serial.print("Calculated Steps: ");
   // Serial.println(steps);
@@ -249,178 +219,174 @@ int controll_valve(Valve v){
   if(steps > 10)
     steps = 4;
   if(delta > 4)
-    v.opening_state = open_n_steps(v, 100, steps);
+    v.opening_state = open_n_steps(&v, 100, steps);
   if(delta < -4){
-    v.opening_state = close_n_steps(v, 100, steps);
+    v.opening_state = close_n_steps(&v, 100, steps);
   }
   return(v.opening_state);
 }
 
-bool v_zero_calibration(Valve v) {
-  Serial.print("opening_state of ");
-  Serial.print(v.name);
-  Serial.print(" : ");
-  Serial.println(v.opening_state);
-  int flow = 1;
+bool close_valve(Valve* v) {
   int steps = 0;
-  v.cur_flow = serial_print_flow(v, true);
-  open_n_steps(v, 100, 50);
-  while (v.cur_flow > 0) {
-    v.cur_flow = serial_print_flow(v, true);
-    close_n_steps(v, 500, 3);
-    if (flow == 0) {
-      close_n_steps(v, 10, 10);
-      steps++;
-    delay(2000);
-    if (steps > 1000) {
-      Serial.println(": Valve Zeroing failed");
-      return (false);
-      }
-    }
+  read_flow_sensor(v);
+
+  while (v->cur_flow > 0) {
+    read_flow_sensor(v);
+    close_n_steps(v, 50, 3);
+    steps++;
+    if (v->cur_flow <= 0)
+      return true;
+    if (steps > 500 && v->cur_flow > 0)
+      return false;
   }
-  Serial.println(": Valve Zeroing conpleted");
+}
+
+bool zero_calibration_test(Valve* v) {
+  int max_flow = 0;
+  int steps = 0;
+  bool closed = false;
+  open_n_steps(v, 100, 50);
+  closed = close_valve(v);
+  if (closed == false) {
+    Serial.print("<gbm>m:error ");
+    Serial.print(v->name);
+    Serial.println(" zeroing failed");
+    return (false);
+  }
+}
+
+bool valve_max_flow_test(Valve* v) {
+  int max_flow = 0;
+  bool closed = false;
+
+  if (read_flow_sensor(v) <= 0) {
+    open_n_steps(v, 50, 600);
+    max_flow = read_flow_sensor(v);
+    closed = close_valve(v);
+  }
+  delay(5000);
+  if (max_flow < 1500 || !closed) {
+      Serial.print("<gbm>m:error ");
+      Serial.print(v->name);
+      Serial.print(" gas flow insufficient: ");
+      Serial.println(max_flow);
+      return (false);
+  }
+  v->active = true;
+  Serial.println("<gbm>n:Zeroing ");
+  Serial.print(v->name);
+  Serial.println(" check");
   return (true);
 }
 
-void show_ox() {
-  Serial.print("Oxygen saturation: ");
-  float oxygen_data = oxygen.readOxygenConcentration();
-  Serial.print("current data is: ");
-  Serial.print(oxygen_data);
-  Serial.println(" %vol");
-}
-
-void ox_zero_calibration(Valve ox_valve, Valve air_valve) {
-  float oxygen_data = 0.0;
+bool air_calibration_test(Valve* air_valve) {
+  int attemt = 0;
+  float fio2 = oxygen.readOxygenConcentration();
   
-  ox_valve.cur_flow = read_flow_sensor(ox_valve);
   if(oxygen.clearCalibration()) {
-    Serial.println("clear calibration success!\n");
-    air_valve.opening_state = open_n_steps(air_valve, 400, 100);
-    show_ox();
+    open_n_steps(air_valve, 400, 100);
 
-    oxygen_data = oxygen.readOxygenConcentration();
-    while (!(oxygen_data < 23)){
-      oxygen_data = oxygen.readOxygenConcentration();
-      Serial.println(oxygen_data);
-      delay(1000);
+    while (attemt < 5){
+      fio2 = oxygen.readOxygenConcentration();
+      if (fio2 < 22 && oxygen.calibration_20_9()) {
+        Serial.println("<gbm>m:Zeroing oxygen sensor at 21% check");
+        close_valve(air_valve);
+        return true;
+      }
+      delay(3000);
     }
-    delay(10000);
-    if(oxygen.calibration_20_9()) 
-        Serial.println("20.9 calibration success!");
-    else
-      Serial.println("20.9 calibration failed!");
-  v_air.opening_state = 500;
-  v_air.active = v_zero_calibration(v_air);
-
-    ox_valve.opening_state = open_n_steps(ox_valve, 400, 100);
-    show_ox(); 
-    while (!(oxygen_data > 95)){
-      oxygen_data = oxygen.readOxygenConcentration();
-      Serial.print("Waiting for oxygen flow: ");
-      show_ox();
-      delay(1000);
-    }
-    delay(10000);
-    if(oxygen.calibration_99_5()) 
-      Serial.println("99.5 calibration success!");
-    else
-      Serial.println("99.5 calibration failed!");
+    Serial.println("<gbm>e:Zeroing oxygen sensor at 21% failed");
+    close_valve(air_valve);
+    return false;
   }
-  v_ox.opening_state = 500;
-  v_ox.active = v_zero_calibration(v_ox);
 }
 
-char *build_state(char* state, valve v_ox, valve v_air, ) {
+bool oxygen_supply_test(Valve* v_ox) {
+  int attemt = 0;
+  float fio2 = oxygen.readOxygenConcentration();
+  
+  open_n_steps(v_ox, 400, 100);
 
-  return (state);
-}
-
-void setup() {
-  Serial.begin(9600);
-  while(!Serial);
-
-  while(!oxygen.begin()) {
-    Serial.println("NO Deivces !");
-    delay(1000);
-    int oxygen_data = oxygen.readOxygenConcentration();
-    if (oxygen_data > 20) {
-      oxs.active = true;
-      v_air.active = v_zero_calibration(v_air);
-      v_ox.active = v_zero_calibration(v_ox);
-      v_ox.opening_state = 0;
-      v_air.opening_state = 0;
-
+  while (attemt < 5){
+    fio2 = oxygen.readOxygenConcentration();
+    if (fio2 > 80 ) {
+      Serial.print("<gbm>m:Sufficient oxygen supply: ");
+      Serial.print(fio2);
+      Serial.println("% check");
+      close_valve(v_ox);
+      return true;
     }
-    else {
-      Serial.print("gbm: ")
-
-    }
-  }
-
-  Serial.println("setup");
-  while(true) {
-    v_air.cur_flow = read_flow_sensor(v_air);
-    // v_air.cur_flow = read_flow_sensor(v_air);
-    oxygen_data = oxygen.readOxygenConcentration();
-    Serial.print("oxygen:  ");
-    Serial.println(oxygen_data);
-    Serial.print("air flow:  ");
-    Serial.println(v_air.cur_flow);
     delay(3000);
   }
+  Serial.print("<gbm>e:Insufficient Oxygen Supply: ");
+  Serial.print(fio2);
+  Serial.println("%");
+  close_valve(v_ox);
+  return false;
+}
 
-  // Serial.begin(9600);
-  // while(!Serial);
-  // if(v_ox.active)
-  // Serial.println("ox valve zeroed!");
+bool self_test(Check_list* cl, Valve v_ox, Valve v_air, Ox_sensor oxs) {
+  cl->av_closed = zero_calibration_test(&v_air);
+  cl->ov_closed = zero_calibration_test(&v_ox);
 
-  // if(v_air.active)
-  // Serial.println("air valve zeroed!");
+  if (cl->av_closed && cl->ov_closed) {
+    cl->av_max_flow = valve_max_flow_test(&v_air);
+    if (cl->av_max_flow) {
+      cl->ox_21_call = air_calibration_test(&v_air);
+      if (cl->ox_21_call) {
+        cl->ov_max_flow = valve_max_flow_test(&v_ox);
+        if (cl->ov_max_flow) {
+        cl->ox_supply = oxygen_supply_test(&v_ox);
+          if (cl->ov_max_flow) {
+            Serial.println("<gbm>m:Selftest completed");
+            return (true);
+          }
+        }
+      }
+    }
+  }
+  Serial.println("<gbm>m:Selftest failed");
+  return (false);
+}
 
+int parse_serial_msg(String msg, Ox_sensor* oxs, Valve* v_ox, Valve* v_air) {
+  if (msg.substring(0, 4) == "<sys>") {
+    if (msg.substring(4, 5) == "m") {
+      if (msg.substring(6, 9) == "aut") {
+        // hier weiter machen
+      }
+    }
+    return 1;
+  }
+  else
+    return 0;
+}
 
-  // while(!oxygen.begin()){
-  //   Serial.println("NO Deivces !");
-  //   delay(1000);
-  // }
+//<sys>m:mode|set_fio2|set_total_flow|set_air_flow|set_oxygen_flow>
+//<sys>m:mode|0000|0000|0000|0000>
+//mode is one of: mnl -> manual ox and air flow adjustment || aut -> set fio2 and total_flow
 
-  // ox_zero_calibration(v_ox, v_air);
-
-  // if(v_ox.active)
-  //   v_ox.opening_state = 0;
-  // if(v_air.active)
-  //   v_air.opening_state = 0;
+void setup() {
+  bool slf_t = false;
+  Serial.begin(9600);
+  while(!Serial && handshake());
+  delay(1000);
+  while(!oxygen.begin()) {
+    Serial.println("<gbm>e:oxygen sensor not connected");
+  delay(1000);
+  self_test(&cl, v_ox, v_air, oxs);
+  }
 }
 
 void loop() {
-  char state[] = []
-  char buffer[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,'\0'};
-  int set_flows[] = {v_ox.set_flow, v_air.set_flow};
-  int buf_len = sizeof(buffer)-1;
   float oxygen_data = oxygen.readOxygenConcentration();
-  Serial.print("current FiO2 is: ");
-  Serial.print(oxygen_data);
-  Serial.println(" %vol ");
-  if (Serial.available() > 0) {
-    buf_len = Serial.readBytes(buffer, buf_len);
-    buffer[buf_len] = '\0';
-  }
-  else 
-    *buffer == 0;
+  String buffer = "";
 
-  if (*buffer != 0) {
-    Serial.print("ser_input : ");
-    Serial.print(buffer);
-    parse_input(buffer, set_flows, &v_air.set_flow, &v_ox.set_flow);
-    Serial.print("set flows : ");
-    Serial.print(set_flows[0]);
-    Serial.print(set_flows[1]);
-    v_ox.set_flow = set_flows[0];
-    v_air.set_flow = set_flows[1];
-  }
+
+
   
-  v_ox.cur_flow = read_flow_sensor(v_ox);
-  v_air.cur_flow = read_flow_sensor(v_air);
+  v_ox.cur_flow = read_flow_sensor(&v_ox);
+  v_air.cur_flow = read_flow_sensor(&v_air);
 
   Serial.print("\naox valve:  ");
   Serial.print(v_ox.cur_flow);
@@ -443,7 +409,6 @@ void loop() {
   // delay(1);
   
 }
-
   // delay(1);
   
 }
