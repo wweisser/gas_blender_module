@@ -79,6 +79,8 @@ Ox_sensor oxs = {21, 21, 0, false};
 
 Check_list cl = {false, false, false, false, false, false, false};
 
+//#########################################################################################################################
+
 int delta(int a, int b) {
   int delta = 0;
   if (a < b) {
@@ -98,13 +100,19 @@ int clac_steps(int diff) {
   return (steps);
 }
 
-void calc_flows(int set_fio2, int set_ac_flow, int* set_ox_flow, int* set_air_flow) {
+void calc_flows(Ox_sensor oxs, Valve* v_ox, Valve* v_air) {
+  int set_fio2 = oxs.set_fio2;
+  int total_flow = oxs.total_flow;
+  float ox_frac = 0.0;
+  float air_frac = 0.0;
+
   if(set_fio2 >= 21 && set_fio2 <= 100){
-    *set_ox_flow = ((set_fio2-21)/0.79)/100;
-    *set_air_flow = (1-(*set_ox_flow));
+    ox_frac = ((set_fio2-21)/0.79)/100;
+    air_frac = (1-(ox_frac));
+    v_ox->set_flow = ox_frac * total_flow;
+    v_air->set_flow = air_frac * total_flow;
   }
   return;
-  // return(set_flows);
 }
 
 void step(bool dir, int* pin_arr, int speed) {
@@ -195,7 +203,6 @@ void parse_input(char* str, int* set_flows, int* set_ox_flow, int* set_air_flow)
       i++;
     }
   }
-  calc_flows(set_fio2, set_ac_flow, set_ox_flow, set_air_flow);
 }
 
 int read_flow_sensor(Valve* v) {
@@ -209,8 +216,6 @@ int read_flow_sensor(Valve* v) {
     flow = (2000 * (powf(sensor_data_voltage, v->gain) - v->v_zero) / (v->v_max));
     mean_flow = mean_flow + flow;
   }
-  Serial.print("sensor_data_voltage: ");
-  Serial.println(sensor_data_voltage);
   mean_flow = mean_flow / 1000;
   v->cur_flow = mean_flow;
   return (mean_flow);
@@ -219,9 +224,11 @@ int read_flow_sensor(Valve* v) {
 bool handshake() {
   String sys_cmd = "";
   Serial.println("<gbm>m:hs_request");
-  delay(1000);
+  delay(3000);
   sys_cmd = Serial.readString();
-  if (sys_cmd == "<sys>m:hs_accept") 
+  sys_cmd.trim(); 
+  Serial.println(sys_cmd);
+  if (sys_cmd == "<sys>m:") 
     return (true);
   erlse:
     return (false);
@@ -332,22 +339,31 @@ bool self_test(Check_list* cl, Valve v_ox, Valve v_air, Ox_sensor oxs) {
   cl->ov_closed = zero_calibration_test(&v_ox);
 
   if (cl->av_closed && cl->ov_closed) {
+    Serial.println("<gbm>m:zero flow check");
     cl->av_max_flow = valve_max_flow_test(&v_air);
     if (cl->av_max_flow) {
+      Serial.println("<gbm>m:max air flow check");
       cl->ox_21_call = air_calibration_test(&v_air);
       if (cl->ox_21_call) {
+        Serial.println("<gbm>m:21% callibration check");
         cl->ov_max_flow = valve_max_flow_test(&v_ox);
         if (cl->ov_max_flow) {
-        cl->ox_supply = oxygen_supply_test(&v_ox);
-          if (cl->ov_max_flow) {
-            Serial.println("<gbm>m:Selftest completed");
+          Serial.println("<gbm>m:max ox flow check");
+          cl->ox_supply = oxygen_supply_test(&v_ox);
+          if (cl->ox_supply) {
+            Serial.println("<gbm>m:oxygen supply check");
+            Serial.println("<gbm>m:sf_fail");
             return (true);
           }
         }
       }
+      else
+        Serial.println("<gbm>e:21% callibration failed");
     }
   }
-  Serial.println("<gbm>m:Selftest failed");
+  else
+    Serial.println("<gbm>m:zero flow failed");
+  Serial.println("<gbm>m:sf_fail");
   return (false);
 }
 
@@ -383,33 +399,46 @@ int broadcast_state(Ox_sensor oxs, Valve v_ox, Valve v_air) {
   String oxygen_flow = String(v_ox.cur_flow);
   String air_flow = String(v_air.cur_flow);
 
-  String bcst_str = "<sys>m:state|" + set_fio2 + "|" + set_total_flow + "|" + set_oxygen_flow + "|" + set_air_flow + "|" + fio2 + "|" + oxygen_flow + "|" + air_flow;
+  String bcst_str = "<gbm>m:state|" + set_fio2 + "|" + set_total_flow + "|" + set_oxygen_flow + "|" + set_air_flow + "|" + fio2 + "|" + oxygen_flow + "|" + air_flow;
   Serial.println(bcst_str);
   return 0;
 }
 
 void setup() {
   bool slf_t = false;
+  int i = 0;
   Serial.begin(9600);
-  while(!Serial && handshake());
-  delay(1000);
-  while(!oxygen.begin()) {
-    Serial.println("<gbm>e:oxygen sensor not connected");
-  delay(1000);
-  self_test(&cl, v_ox, v_air, oxs);
+  while(!Serial);
+    delay(1000);
+  while(!handshake());
+    delay(1000);
+  while(i++<3 && !oxygen.begin()){
+    Serial.println("<gbm>e:oxygen sensor disconnected");
+    delay(3000);
   }
+  while(i++<3 && self_test(&cl, v_ox, v_air, oxs));
 }
 
 void loop() {
   String msg = Serial.readString();
   parse_serial_msg(msg, &oxs, &v_ox, &v_air);
-
+  // Serial.println("MILESTONE 1 \n");
   read_flow_sensor(&v_ox);
   read_flow_sensor(&v_air);
+  // Serial.println("MILESTONE 2 \n");
+
   oxs.curr_fio2 = oxygen.readOxygenConcentration();
+  // Serial.println("MILESTONE 3 \n");
 
-  // Process data and link to commands to valves.
+  calc_flows(oxs, &v_ox, &v_air);
+  // Serial.println("MILESTONE 4 \n");
 
+  controll_valve(v_ox);
+  controll_valve(v_air);
+  // Serial.println("MILESTONE 5 \n");
+
+  oxs.curr_fio2 = oxygen.readOxygenConcentration();
   broadcast_state(oxs, v_ox, v_air);
-  
+
+  delay(3000);
 }
